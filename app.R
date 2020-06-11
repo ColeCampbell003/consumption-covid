@@ -11,6 +11,7 @@ library(readr)
 library(dplyr)
 library(tidyverse)
 library(knitr)
+library(lubridate)
 library(ggplot2)
 library(ggthemes)
 library(shiny)
@@ -28,7 +29,8 @@ library(shinythemes)
 # data <- read_excel(file.path(datadir, "earnest05_21_2020.xlsx"))
 data <- read_excel("Data/earnest05_21_2020.xlsx")
 data_st <- read_excel("Data/earnest05_25_2020_state.xlsx")
-data_subcat <- read_excel("Data/earnest05-28-2020-subcategory.xlsx")
+data_subcat <- read_excel("Data/earnest_subcategory.xlsx")
+inequality_national <- read_excel("Data/inequality_national.xlsx")
 
 
 ## clean category data ##
@@ -55,7 +57,7 @@ data <- data %>%
     group_by(category) %>%
     mutate(pct_change = 
                ((lag_spend - lag_spend[date==as.Date("2020-01-08")]
-               )/lag_spend[date==as.Date("2020-01-08")])*100)
+               )/lag_spend[date==as.Date("2020-01-08")]))
 
 # make consistent date variable -> i think there's something fucked up with 
 # their dates
@@ -74,9 +76,9 @@ data_total <- data_total %>%
     mutate(log_spend = log(total_spend)) %>% 
     mutate(pct_change = 
                ((total_spend - total_spend[date==as.Date("2020-01-08")]
-                 )/total_spend[date==as.Date("2020-01-08")])*100) %>% 
+                 )/total_spend[date==as.Date("2020-01-08")])) %>% 
     mutate(yoy_growth = (total_spend -  lag(total_spend, 52))/
-               lag(total_spend,52)*100)
+               lag(total_spend,52))
 
 ## clean state data ##
 # select variables
@@ -88,7 +90,7 @@ data_st <- data_st %>%
     mutate(date = as.Date(date)) %>% 
     mutate(log_spend = log(consumption)) %>% 
     mutate(pct_change = ((consumption - consumption[date==as.Date("2020-01-01")]
-                          )/consumption[date==as.Date("2020-01-01")])*100)
+                          )/consumption[date==as.Date("2020-01-01")]))
  
 ## clean subcategory data ##
 data_subcat <- data_subcat %>% 
@@ -100,8 +102,8 @@ data_subcat <- data_subcat %>%
            year = `Earnest Year`,
            month = `Month of Earnest Week End Date`,
            subcategory = Subcategory,
-           lag_spend = `Trailing Weeks Value`,
-           lag_growth = `Trailing Weeks YoY Growth`
+           lag_spend_sub = `Trailing Weeks Value`,
+           lag_growth_sub = `Trailing Weeks YoY Growth`
            ) %>% 
     # make consistent date variable
     mutate(date = paste(month, day, sep = " ") %>% 
@@ -109,13 +111,28 @@ data_subcat <- data_subcat %>%
                paste(year, sep = " ") %>% 
                as.Date(format = '%B %d, %Y')) %>% 
     # take logs of spending
-    mutate(log_spend = log(lag_spend)) %>% 
+    mutate(log_spend_sub = log(lag_spend_sub)) %>% 
     group_by(subcategory) %>% 
-    mutate(pct_change = 
-               ((lag_spend - lag_spend[date==as.Date("2020-01-08")]
-               )/lag_spend[date==as.Date("2020-01-08")])*100)
+    mutate(pct_change_sub = 
+               ((lag_spend_sub - lag_spend_sub[date==as.Date("2020-01-08")]
+               )/lag_spend_sub[date==as.Date("2020-01-08")]),
+           yoy_growth_sub = (lag_spend_sub -  lag(lag_spend_sub, 52))/
+               lag(lag_spend_sub,52)) %>% 
+    ungroup() %>% 
+    group_by(category, date) %>% 
+    mutate(lag_spend_cat = sum(lag_spend_sub),
+           log_spend_cat = log(lag_spend_cat)) %>% 
+    ungroup() %>% 
+    group_by(category) %>% 
+    mutate(pct_change_cat =
+               (lag_spend_cat - lag_spend_cat[date==as.Date("2020-01-08")]
+                )/lag_spend_cat[date==as.Date("2020-01-08")])
     
-
+## clean inequality data (update the end date as needed)
+inequality_national <- inequality_national %>% 
+    mutate(date = seq(ymd("2018-01-01"), ymd("2020-04-01"), by = "month"),
+           earn_p9010_national = earn_p90_national/earn_p10_national,
+           earn_p5010_national = earn_p50_national/earn_p10_national)
 
 
 # = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = 
@@ -124,7 +141,7 @@ data_subcat <- data_subcat %>%
 
 # define ui for app
 ui <- navbarPage(
-    title = "Tracking Consumer Spending During COVID-19",
+    title = "Tracking Consumer Spending and Inequality During COVID-19",
     fluid = TRUE,
     theme = shinytheme("superhero"),
     tabPanel("National Trends",
@@ -196,6 +213,26 @@ ui <- navbarPage(
                  # main panel for displaying outputs
                  mainPanel(
                      plotOutput(outputId = "statePlot")
+                 )
+             )
+    ),
+    tabPanel("Income Inequality",
+             sidebarLayout(
+                 sidebarPanel(
+                     
+                     # input: dates slider
+                     sliderInput(inputId = "date_range_ineq",
+                                            label = "Date Range",
+                                            min = min(inequality_national$date),
+                                            max = max(inequality_national$date),
+                                            value = c(as.Date("January 1, 2019", 
+                                                              format = '%B %d, %Y'),
+                                                      max(inequality_national$date)))
+                     # input: inequality measure
+                     
+                 ),
+                 mainPanel(
+                     plotOutput(outputId = "inequalityPlot")
                  )
              )
     )
@@ -458,6 +495,36 @@ server <- function(input, output) {
                 scale_linetype_identity()
         }
     }) 
+    
+    # = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = 
+    # inequality
+    # = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = 
+    
+    plotDataIneq <- reactive({
+        inequality_national %>% 
+            filter(date>=input$date_range_ineq[1] & date<=input$date_range_ineq[2])
+    })
+    
+    output$inequalityPlot <- renderPlot({
+        plotDataIneq() %>% 
+            ggplot(aes(x = date)) +
+            geom_line(aes(y = earn_p9010_national, color = "earn_p9010_national")) +
+            geom_line(aes(y = earn_p9050_national, color = "earn_p9050_national")) +
+            geom_line(aes(y = earn_p5010_national, color = "earn_p5010_national")) +
+            geom_vline(xintercept = as.Date("March 13, 2020", format = '%B %d, %Y'),
+                       linetype = 4) +
+            geom_vline(xintercept = as.Date("April 13, 2020", format = '%B %d, %Y'),
+                       linetype = 4) +
+            xlab("Date") +
+            ylab("") +
+            labs(title = "Earnings Inequality, Percentile Ratios", 
+                 caption = "Source: Current Population Survey",
+                 color = "Earnings Ratio") +
+            theme_economist_white(gray_bg = FALSE) +
+            scale_color_manual(labels = c("90/10 Ratio", "90/50 Ratio", "50/10 Ratio"), 
+                               values = c("darkred", "steelblue", "grey")) +
+            scale_linetype_identity()
+    })
 }
 
 # run app
